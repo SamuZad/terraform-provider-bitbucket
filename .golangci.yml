@@ -25,3 +25,7 @@ linters:
     - unparam
     - unused
     - govet
+
+linters-settings:
+  errcheck:
+    ignore: Set
