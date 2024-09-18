@@ -15,7 +15,7 @@ func main() {
 
 	plugin.Serve(&plugin.ServeOpts{
 		ProviderFunc: bitbucket.Provider,
-		ProviderAddr: "DrFaust92/bitbucket",
+		ProviderAddr: "samuzad/bitbucket",
 		Debug:        debug,
 	})
 }

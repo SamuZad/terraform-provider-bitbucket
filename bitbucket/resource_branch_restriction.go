@@ -142,7 +142,7 @@ func createBranchRestriction(d *schema.ResourceData) *bitbucket.Branchrestrictio
 
 	for _, item := range d.Get("users").(*schema.Set).List() {
 		account := bitbucket.Account{
-			Username: item.(string),
+			Uuid: item.(string),
 		}
 
 		users = append(users, account)
