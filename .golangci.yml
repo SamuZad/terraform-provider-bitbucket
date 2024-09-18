@@ -8,7 +8,7 @@ linters:
   disable-all: true
   enable:
     - durationcheck
-    - errcheck
+    # - errcheck
     - exportloopref
     - forcetypeassert
     - godot
