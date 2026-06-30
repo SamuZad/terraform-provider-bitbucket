@@ -167,6 +167,9 @@ func providerConfigure(d *schema.ResourceData) (interface{}, error) {
 	}
 
 	conf := bitbucket.NewConfiguration()
+	conf.HTTPClient = &http.Client{
+		Transport: &retryingTransport{base: http.DefaultTransport},
+	}
 	apiClient := ProviderConfig{
 		ApiClient:   bitbucket.NewAPIClient(conf),
 		AuthContext: authCtx,

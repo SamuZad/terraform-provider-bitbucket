@@ -7,8 +7,14 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"golang.org/x/oauth2"
+)
+
+const (
+	maxRetries     = 12
+	maxBackoffWait = 1 * time.Hour
 )
 
 // Error represents a error from the bitbucket api.
@@ -45,53 +51,73 @@ func (c *Client) Do(method, endpoint string, payload *bytes.Buffer, contentType 
 	absoluteendpoint := BitbucketEndpoint + endpoint
 	log.Printf("[DEBUG] Sending request to %s %s", method, absoluteendpoint)
 
-	var bodyreader io.Reader
-
+	var bodyBytes []byte
 	if payload != nil {
-		log.Printf("[DEBUG] With payload %s", payload.String())
-		bodyreader = payload
+		bodyBytes = payload.Bytes()
+		log.Printf("[DEBUG] With payload %s", string(bodyBytes))
 	}
 
-	req, err := http.NewRequest(method, absoluteendpoint, bodyreader)
-	if err != nil {
-		return nil, err
-	}
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		var bodyreader io.Reader
+		if bodyBytes != nil {
+			bodyreader = bytes.NewReader(bodyBytes)
+		}
 
-	if c.Username != nil && c.Password != nil {
-		log.Printf("[DEBUG] Setting Basic Auth")
-		req.SetBasicAuth(*c.Username, *c.Password)
-	}
-
-	if c.OAuthToken != nil {
-		log.Printf("[DEBUG] Setting Bearer Token")
-		bearer := "Bearer " + *c.OAuthToken
-		req.Header.Add("Authorization", bearer)
-	}
-
-	if c.OAuthTokenSource != nil {
-		token, err := c.OAuthTokenSource.Token()
+		req, err := http.NewRequest(method, absoluteendpoint, bodyreader)
 		if err != nil {
 			return nil, err
 		}
 
-		token.SetAuthHeader(req)
+		if c.Username != nil && c.Password != nil {
+			log.Printf("[DEBUG] Setting Basic Auth")
+			req.SetBasicAuth(*c.Username, *c.Password)
+		}
+
+		if c.OAuthToken != nil {
+			log.Printf("[DEBUG] Setting Bearer Token")
+			bearer := "Bearer " + *c.OAuthToken
+			req.Header.Add("Authorization", bearer)
+		}
+
+		if c.OAuthTokenSource != nil {
+			token, err := c.OAuthTokenSource.Token()
+			if err != nil {
+				return nil, err
+			}
+
+			token.SetAuthHeader(req)
+		}
+
+		if bodyBytes != nil && contentType != "" {
+			// Can cause bad request when putting default reviews if set.
+			req.Header.Add("Content-Type", contentType)
+		}
+
+		req.Close = true
+
+		var doErr error
+		resp, doErr = c.HTTPClient.Do(req)
+		log.Printf("[DEBUG] Resp: %v Err: %v", resp, doErr)
+		if doErr != nil {
+			return resp, doErr
+		}
+		if resp == nil {
+			return nil, fmt.Errorf("no response from %s %s", method, absoluteendpoint)
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < maxRetries {
+			wait := backoffDuration(attempt)
+			log.Printf("[WARN] 429 from %s %s; retrying in %s (attempt %d/%d)", method, endpoint, wait, attempt+1, maxRetries)
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			time.Sleep(wait)
+			continue
+		}
+
+		break
 	}
 
-	if payload != nil && contentType != "" {
-		// Can cause bad request when putting default reviews if set.
-		req.Header.Add("Content-Type", contentType)
-	}
-
-	req.Close = true
-
-	resp, err := c.HTTPClient.Do(req)
-	log.Printf("[DEBUG] Resp: %v Err: %v", resp, err)
-	if err != nil {
-		return resp, err
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("no response from %s %s", method, absoluteendpoint)
-	}
 	if resp.StatusCode >= 400 || resp.StatusCode < 200 {
 		apiError := Error{
 			StatusCode: resp.StatusCode,
@@ -113,7 +139,58 @@ func (c *Client) Do(method, endpoint string, payload *bytes.Buffer, contentType 
 		return resp, error(apiError)
 
 	}
-	return resp, err
+	return resp, nil
+}
+
+// backoffDuration returns the capped exponential backoff for the given retry
+// attempt. Bitbucket Cloud does not send a Retry-After header on 429s, so we
+// rely entirely on this schedule.
+func backoffDuration(attempt int) time.Duration {
+	backoff := time.Duration(1<<uint(attempt+1)) * time.Second
+	if backoff > maxBackoffWait {
+		backoff = maxBackoffWait
+	}
+	return backoff
+}
+
+// retryingTransport wraps an http.RoundTripper and retries 429 responses with
+// the same exponential backoff as Client.Do. It is installed on the swagger
+// SDK's HTTP client so 2.0 API calls get the same throttling behaviour as the
+// custom 1.0 client.
+type retryingTransport struct {
+	base http.RoundTripper
+}
+
+func (t *retryingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var bodyBytes []byte
+	if req.Body != nil {
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Body.Close()
+		bodyBytes = b
+	}
+
+	for attempt := 0; ; attempt++ {
+		if bodyBytes != nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		resp, err := t.base.RoundTrip(req)
+		if err != nil {
+			return resp, err
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= maxRetries {
+			return resp, nil
+		}
+
+		wait := backoffDuration(attempt)
+		log.Printf("[WARN] 429 from %s %s; retrying in %s (attempt %d/%d)", req.Method, req.URL.Path, wait, attempt+1, maxRetries)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		time.Sleep(wait)
+	}
 }
 
 // Get is just a helper method to do but with a GET verb
