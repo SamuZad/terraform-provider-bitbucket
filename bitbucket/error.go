@@ -21,10 +21,25 @@ type ClientScopeError struct {
 
 func handleClientError(httpResponse *http.Response, err error) error {
 	if oauthError, ok := err.(*oauth2.RetrieveError); ok {
-		return fmt.Errorf("%s: %s", oauthError.Response.Status, oauthError.ErrorDescription)
+		status := "OAuth token retrieval failed"
+		if oauthError.Response != nil {
+			status = oauthError.Response.Status
+		}
+		description := oauthError.ErrorDescription
+		if description == "" {
+			description = oauthError.Error()
+		}
+		return fmt.Errorf("%s: %s", status, description)
 	}
 
-	if httpResponse == nil || httpResponse.StatusCode < 400 {
+	if httpResponse == nil {
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if httpResponse.StatusCode < 400 {
 		return nil
 	}
 
@@ -43,12 +58,12 @@ func handleClientError(httpResponse *http.Response, err error) error {
 
 func extractErrorMessage(body []byte) string {
 	var bitbucketHttpError bitbucket.ModelError
-	if err := json.Unmarshal(body, &bitbucketHttpError); err == nil {
+	if err := json.Unmarshal(body, &bitbucketHttpError); err == nil && bitbucketHttpError.Error_ != nil {
 		return bitbucketHttpError.Error_.Message
 	}
 
 	var clientScopeErr ClientScopeError
-	if err := json.Unmarshal(body, &clientScopeErr); err == nil {
+	if err := json.Unmarshal(body, &clientScopeErr); err == nil && clientScopeErr.Error.Message != "" {
 		message := clientScopeErr.Error.Message
 		required := clientScopeErr.Error.Detail.Required
 		granted := clientScopeErr.Error.Detail.Granted
